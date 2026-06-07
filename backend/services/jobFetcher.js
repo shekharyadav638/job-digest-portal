@@ -81,47 +81,77 @@ function normalise(job) {
 
 // ── Adzuna ────────────────────────────────────────────────────────────────────
 
+function adzunaJob(j) {
+  return normalise({
+    externalId: `adzuna-${j.id}`,
+    title: j.title,
+    company: j.company?.display_name,
+    location: j.location?.display_name,
+    salary: j.salary_min
+      ? `${Math.round(j.salary_min / 100000)}–${Math.round(j.salary_max / 100000)} LPA`
+      : '',
+    description: j.description,
+    applyUrl: j.redirect_url,
+    source: 'adzuna',
+  });
+}
+
+async function fetchAdzunaPage(page, whatOr) {
+  const params = new URLSearchParams({
+    app_id: ADZUNA_APP_ID,
+    app_key: ADZUNA_APP_KEY,
+    results_per_page: '50',
+    what_or: whatOr,
+    sort_by: 'date',
+    'content-type': 'application/json',
+  });
+  const res = await fetch(`https://api.adzuna.com/v1/api/jobs/in/search/${page}?${params}`);
+  if (!res.ok) throw new Error(`Adzuna page ${page} HTTP ${res.status}`);
+  const data = await res.json();
+  return data.results || [];
+}
+
 async function fetchAdzuna(preferredRoles) {
   if (!ADZUNA_APP_ID || !ADZUNA_APP_KEY) {
     console.warn('[jobFetcher] Adzuna credentials missing, skipping');
     return [];
   }
 
-  // Use what_or so any role keyword matches (AND was too restrictive → 0 results)
-  // Pick the first 5 roles, join with spaces — Adzuna treats spaces as OR in what_or
-  const whatOr = preferredRoles.length > 0
+  // Run two queries in parallel:
+  // 1. preferred roles (OR match)
+  // 2. tech stack keywords — catches more specific listings
+  const roleQuery = preferredRoles.length > 0
     ? preferredRoles.slice(0, 5).join(' ')
     : 'backend developer software engineer';
 
-  const params = new URLSearchParams({
-    app_id: ADZUNA_APP_ID,
-    app_key: ADZUNA_APP_KEY,
-    results_per_page: '50',
-    what_or: whatOr,       // OR match: any keyword hits → job included
-    sort_by: 'date',       // freshest first
-    'content-type': 'application/json',
-  });
-
-  const url = `https://api.adzuna.com/v1/api/jobs/in/search/1?${params}`;
+  const techQuery = 'node.js express python django java spring backend developer';
 
   try {
-    const res = await fetch(url);
-    if (!res.ok) throw new Error(`Adzuna HTTP ${res.status}`);
-    const data = await res.json();
+    // Fetch pages 1-3 for role query + page 1 for tech query — all in parallel
+    const [r1, r2, r3, t1] = await Promise.allSettled([
+      fetchAdzunaPage(1, roleQuery),
+      fetchAdzunaPage(2, roleQuery),
+      fetchAdzunaPage(3, roleQuery),
+      fetchAdzunaPage(1, techQuery),
+    ]);
 
-    console.log(`[jobFetcher] Adzuna returned ${(data.results || []).length} jobs`);
-    return (data.results || []).map(j => normalise({
-      externalId: `adzuna-${j.id}`,
-      title: j.title,
-      company: j.company?.display_name,
-      location: j.location?.display_name,
-      salary: j.salary_min
-        ? `${Math.round(j.salary_min / 100000)}–${Math.round(j.salary_max / 100000)} LPA`
-        : '',
-      description: j.description,
-      applyUrl: j.redirect_url,
-      source: 'adzuna',
-    }));
+    const raw = [
+      ...(r1.status === 'fulfilled' ? r1.value : []),
+      ...(r2.status === 'fulfilled' ? r2.value : []),
+      ...(r3.status === 'fulfilled' ? r3.value : []),
+      ...(t1.status === 'fulfilled' ? t1.value : []),
+    ];
+
+    // Deduplicate by Adzuna job id
+    const seen = new Set();
+    const unique = raw.filter(j => {
+      if (seen.has(j.id)) return false;
+      seen.add(j.id);
+      return true;
+    });
+
+    console.log(`[jobFetcher] Adzuna returned ${unique.length} jobs (across 4 queries)`);
+    return unique.map(adzunaJob);
   } catch (err) {
     console.error('[jobFetcher] Adzuna error:', err.message);
     return [];

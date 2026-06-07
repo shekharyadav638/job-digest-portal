@@ -32,10 +32,10 @@ Return this exact JSON:
 }
 
 Score guide:
-- 80-100: Excellent match. Exact skills, right level, right location preference.
-- 60-79: Good match. Most skills align, minor gaps.
-- 40-59: Partial match. Some relevant skills but notable gaps.
-- Below 40: Poor match. Skip.`;
+- 80-100: Excellent match. Exact skills, right seniority level, right tech stack.
+- 55-79: Good match. Most skills align, minor gaps or seniority difference.
+- 30-54: Partial match. Some relevant skills but notable gaps.
+- Below 30: Poor match. Different domain entirely.`;
 
   try {
     const response = await client.chat.completions.create({
@@ -66,7 +66,7 @@ async function scoreJobsSequentially(jobs, candidateProfileStr) {
     console.log(`[jobScorer] Scoring: ${job.title} @ ${job.company}`);
     const scored = await scoreJob(job, candidateProfileStr);
 
-    if (scored && scored.score >= 60) {
+    if (scored && scored.score >= 55) {
       results.push({
         ...job,
         matchScore: scored.score,
