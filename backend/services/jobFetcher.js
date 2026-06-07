@@ -120,32 +120,49 @@ async function fetchAdzuna(preferredRoles) {
 async function fetchJSearch(preferredRoles) {
   if (!JSEARCH_API_KEY) return [];
 
+  const roleQuery = preferredRoles.slice(0, 2).join(' OR ') || 'software engineer';
   const queries = [
-    `${preferredRoles.slice(0, 2).join(' OR ')} in India`,
+    `${roleQuery} in India`,
     `remote ${preferredRoles[0] || 'software engineer'}`,
   ];
 
-  const settled = await Promise.allSettled(queries.map(q =>
-    fetch(`https://api.openwebninja.com/jsearch/search-v2?query=${encodeURIComponent(q)}&country=in&num_pages=1`, {
-      headers: { 'x-api-key': JSEARCH_API_KEY },
-    }).then(r => r.ok ? r.json() : Promise.reject(`JSearch HTTP ${r.status}`))
-  ));
-
-  const raw = settled.flatMap(r => r.status === 'fulfilled' ? (r.value.data || []) : []);
+  const jobs = [];
   const seen = new Set();
-  const unique = raw.filter(j => { if (seen.has(j.job_id)) return false; seen.add(j.job_id); return true; });
 
-  console.log(`[jobFetcher] JSearch: ${unique.length} jobs`);
-  return unique.map(j => normalise({
-    externalId: `jsearch-${j.job_id}`,
-    title: j.job_title, company: j.employer_name,
-    location: j.job_city ? `${j.job_city}, ${j.job_country}` : (j.job_country || 'India'),
-    salary: j.job_salary_currency
-      ? `${j.job_salary_currency}${j.job_min_salary || ''}–${j.job_max_salary || ''}`
-      : '',
-    description: j.job_description?.slice(0, 2000) || '',
-    applyUrl: j.job_apply_link, source: 'jsearch',
-  }));
+  for (const q of queries) {
+    try {
+      const url = `https://api.openwebninja.com/jsearch/search-v2?query=${encodeURIComponent(q)}&num_pages=1`;
+      const res = await fetch(url, { headers: { 'x-api-key': JSEARCH_API_KEY } });
+      if (!res.ok) {
+        const text = await res.text();
+        console.warn(`[jobFetcher] JSearch HTTP ${res.status} for "${q}":`, text.slice(0, 200));
+        continue;
+      }
+      const data = await res.json();
+      if (!data.data) {
+        console.warn('[jobFetcher] JSearch unexpected response shape:', JSON.stringify(data).slice(0, 200));
+        continue;
+      }
+      for (const j of data.data) {
+        const id = j.job_id;
+        if (!id || seen.has(id)) continue;
+        seen.add(id);
+        jobs.push(normalise({
+          externalId: `jsearch-${id}`,
+          title: j.job_title, company: j.employer_name,
+          location: j.job_city ? `${j.job_city}, ${j.job_country}` : (j.job_country || 'India'),
+          salary: j.job_min_salary ? `${j.job_min_salary}–${j.job_max_salary} ${j.job_salary_currency || ''}`.trim() : '',
+          description: (j.job_description || '').slice(0, 2000),
+          applyUrl: j.job_apply_link, source: 'jsearch',
+        }));
+      }
+    } catch (err) {
+      console.error(`[jobFetcher] JSearch error for "${q}":`, err.message);
+    }
+  }
+
+  console.log(`[jobFetcher] JSearch: ${jobs.length} jobs`);
+  return jobs;
 }
 
 // ── RemoteOK ──────────────────────────────────────────────────────────────────
@@ -168,8 +185,7 @@ const REMOTEOK_TAG_MAP = {
 };
 
 async function fetchRemoteOK(preferredRoles) {
-  // Map preferred roles to RemoteOK tags
-  const tags = new Set(['backend', 'software']);
+  const tags = new Set(['backend', 'software-engineer']);
   for (const role of preferredRoles) {
     const lower = role.toLowerCase();
     for (const [key, tag] of Object.entries(REMOTEOK_TAG_MAP)) {
@@ -177,31 +193,39 @@ async function fetchRemoteOK(preferredRoles) {
     }
   }
 
-  const tagList = [...tags].slice(0, 4);
-  const settled = await Promise.allSettled(
-    tagList.map(tag =>
-      fetch(`https://remoteok.com/api?tags=${tag}`, {
-        headers: { 'User-Agent': 'JobDigestPortal/1.0 (job-digest-portal)' },
-      }).then(r => r.ok ? r.json() : Promise.reject(`RemoteOK HTTP ${r.status}`))
-    )
-  );
-
+  const tagList = [...tags].slice(0, 3);
   const seen = new Set();
   const jobs = [];
-  for (const r of settled) {
-    if (r.status !== 'fulfilled') continue;
-    const arr = Array.isArray(r.value) ? r.value.slice(1) : []; // skip legal notice at index 0
-    for (const j of arr) {
-      if (!j.id || seen.has(j.id)) continue;
-      seen.add(j.id);
-      jobs.push(normalise({
-        externalId: `remoteok-${j.id}`,
-        title: j.position, company: j.company,
-        location: j.location || 'Remote',
-        salary: j.salary || '',
-        description: j.description ? stripHtml(j.description) : (j.tags || []).join(', '),
-        applyUrl: j.url, source: 'remoteok',
-      }));
+
+  for (const tag of tagList) {
+    try {
+      const res = await fetch(`https://remoteok.com/api?tags=${tag}`, {
+        headers: {
+          'User-Agent': 'Mozilla/5.0 (compatible; JobDigestBot/1.0)',
+          'Accept': 'application/json',
+        },
+      });
+      if (!res.ok) {
+        console.warn(`[jobFetcher] RemoteOK HTTP ${res.status} for tag "${tag}"`);
+        continue;
+      }
+      const data = await res.json();
+      const arr = Array.isArray(data) ? data.slice(1) : []; // index 0 is legal notice
+      for (const j of arr) {
+        const id = j.id || j.slug;
+        if (!id || seen.has(String(id))) continue;
+        seen.add(String(id));
+        jobs.push(normalise({
+          externalId: `remoteok-${id}`,
+          title: j.position || j.title, company: j.company,
+          location: j.location || 'Remote',
+          salary: j.salary || '',
+          description: j.description ? stripHtml(j.description) : (j.tags || []).join(', '),
+          applyUrl: j.apply_url || j.url, source: 'remoteok',
+        }));
+      }
+    } catch (err) {
+      console.error(`[jobFetcher] RemoteOK error for tag "${tag}":`, err.message);
     }
   }
 
@@ -214,27 +238,45 @@ async function fetchRemoteOK(preferredRoles) {
 
 async function fetchHimalayas(preferredRoles) {
   const query = preferredRoles.slice(0, 2).join(' ') || 'software engineer';
-  const settled = await Promise.allSettled([
-    fetch(`https://himalayas.app/jobs/api/search?q=${encodeURIComponent(query)}&seniority=Junior&sort=recent`).then(r => r.ok ? r.json() : Promise.reject()),
-    fetch(`https://himalayas.app/jobs/api/search?q=${encodeURIComponent('backend developer')}&seniority=Junior&sort=recent`).then(r => r.ok ? r.json() : Promise.reject()),
-  ]);
+  const urls = [
+    // Search with seniority filter
+    `https://himalayas.app/jobs/api/search?q=${encodeURIComponent(query)}&sort=recent`,
+    // Browse all — no filter, more results
+    `https://himalayas.app/jobs/api?offset=0&limit=20`,
+  ];
 
   const seen = new Set();
   const jobs = [];
-  for (const r of settled) {
-    if (r.status !== 'fulfilled') continue;
-    for (const j of (r.value.jobs || [])) {
-      if (!j.id || seen.has(j.id)) continue;
-      seen.add(j.id);
-      jobs.push(normalise({
-        externalId: `himalayas-${j.id}`,
-        title: j.title, company: j.company?.name || j.companyName || '',
-        location: (j.locationRestrictions || []).join(', ') || 'Remote',
-        salary: j.salaryRange || j.salary || '',
-        description: j.description ? stripHtml(j.description) : '',
-        applyUrl: j.applicationLink || j.applyLink || j.url || '',
-        source: 'himalayas',
-      }));
+
+  for (const url of urls) {
+    try {
+      const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+      if (!res.ok) {
+        console.warn(`[jobFetcher] Himalayas HTTP ${res.status} for ${url}`);
+        continue;
+      }
+      const data = await res.json();
+      // Response may be { jobs: [...] } or { data: [...] } or plain array
+      const list = data.jobs || data.data || (Array.isArray(data) ? data : []);
+      for (const j of list) {
+        const id = j.id || j.slug;
+        if (!id || seen.has(String(id))) continue;
+        seen.add(String(id));
+        jobs.push(normalise({
+          externalId: `himalayas-${id}`,
+          title: j.title,
+          company: typeof j.company === 'string' ? j.company : (j.company?.name || j.companyName || ''),
+          location: Array.isArray(j.locationRestrictions)
+            ? j.locationRestrictions.join(', ')
+            : (j.location || j.jobGeo || 'Remote'),
+          salary: j.salaryRange || j.salary || '',
+          description: j.description ? stripHtml(j.description) : '',
+          applyUrl: j.applicationLink || j.applyLink || j.url || '',
+          source: 'himalayas',
+        }));
+      }
+    } catch (err) {
+      console.error(`[jobFetcher] Himalayas error:`, err.message);
     }
   }
 
@@ -247,37 +289,44 @@ async function fetchHimalayas(preferredRoles) {
 
 async function fetchJobicy(preferredRoles) {
   const techTags = ['backend', 'node', 'python', 'java', 'devops', 'fullstack'];
-
-  // Pick tags from preferred roles if possible
   const matchedTags = techTags.filter(tag =>
     preferredRoles.some(r => r.toLowerCase().includes(tag))
   );
   const tagsToFetch = matchedTags.length > 0 ? matchedTags.slice(0, 2) : ['backend', 'node'];
 
-  const settled = await Promise.allSettled(
-    tagsToFetch.map(tag =>
-      fetch(`https://jobicy.com/api/v2/remote-jobs?count=50&industry=software-development&tag=${tag}`)
-        .then(r => r.ok ? r.json() : Promise.reject(`Jobicy HTTP ${r.status}`))
-    )
-  );
-
   const seen = new Set();
   const jobs = [];
-  for (const r of settled) {
-    if (r.status !== 'fulfilled') continue;
-    for (const j of (r.value.jobs || [])) {
-      if (!j.id || seen.has(j.id)) continue;
-      seen.add(j.id);
-      jobs.push(normalise({
-        externalId: `jobicy-${j.id}`,
-        title: j.jobTitle, company: j.companyName,
-        location: j.jobGeo || 'Remote',
-        salary: j.annualSalaryMin
-          ? `$${Math.round(j.annualSalaryMin/1000)}k–$${Math.round(j.annualSalaryMax/1000)}k`
-          : '',
-        description: stripHtml(j.jobDescription || ''),
-        applyUrl: j.url, source: 'jobicy',
-      }));
+
+  for (const tag of tagsToFetch) {
+    try {
+      const url = `https://jobicy.com/api/v2/remote-jobs?count=50&industry=software-development&tag=${tag}`;
+      const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
+      if (!res.ok) {
+        console.warn(`[jobFetcher] Jobicy HTTP ${res.status} for tag "${tag}"`);
+        continue;
+      }
+      const data = await res.json();
+      if (!data.jobs) {
+        console.warn('[jobFetcher] Jobicy unexpected response:', JSON.stringify(data).slice(0, 200));
+        continue;
+      }
+      for (const j of data.jobs) {
+        const id = j.id;
+        if (!id || seen.has(String(id))) continue;
+        seen.add(String(id));
+        jobs.push(normalise({
+          externalId: `jobicy-${id}`,
+          title: j.jobTitle, company: j.companyName,
+          location: j.jobGeo || 'Remote',
+          salary: j.annualSalaryMin
+            ? `$${Math.round(j.annualSalaryMin/1000)}k–$${Math.round(j.annualSalaryMax/1000)}k`
+            : '',
+          description: stripHtml(j.jobDescription || ''),
+          applyUrl: j.url, source: 'jobicy',
+        }));
+      }
+    } catch (err) {
+      console.error(`[jobFetcher] Jobicy error for tag "${tag}":`, err.message);
     }
   }
 
