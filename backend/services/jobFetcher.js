@@ -3,6 +3,69 @@ require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 const ADZUNA_APP_ID = process.env.ADZUNA_APP_ID;
 const ADZUNA_APP_KEY = process.env.ADZUNA_APP_KEY;
 
+// ── Pre-filter config ─────────────────────────────────────────────────────────
+
+// If ANY of these appear in the title → reject immediately (not a tech role)
+const REJECT_TITLE_WORDS = [
+  'writer', 'copywriter', 'editor', 'proofreader', 'translator',
+  'sales', 'account executive', 'account manager', 'business development',
+  'marketing', 'seo', 'social media', 'content creator',
+  'data analyst', 'business analyst', 'financial analyst', 'data labeling',
+  'data annotation', 'data entry', 'transcription',
+  'customer success', 'customer support', 'customer service', 'customer operations',
+  'recruiter', 'talent acquisition', 'human resources',
+  'office assistant', 'administrative', 'receptionist',
+  'video editor', 'graphic designer', 'motion designer',
+  'operations manager', 'director of revenue', 'director of sales',
+  'inside sales', 'head of sales', 'vp of sales',
+  'tutor', 'teacher', 'instructor', 'coach',
+  'cinematic', 'freelance writer',
+];
+
+// If ANY of these appear in the title → keep (generic tech terms)
+const TECH_TITLE_WORDS = [
+  'engineer', 'developer', 'dev ', 'software', 'backend', 'front-end', 'frontend',
+  'fullstack', 'full-stack', 'full stack', 'programmer', 'architect',
+  'sde', 'swe', 'sde-1', 'sde-2', 'sde1', 'sde2',
+  'node', 'react', 'python', 'java ', 'golang', 'ruby', 'rails', 'php',
+  'typescript', 'javascript', '.net', 'scala', 'kotlin', 'swift',
+  'devops', 'platform', 'infrastructure', 'cloud', 'sre', 'site reliability',
+  'mobile', 'ios ', 'android', 'flutter',
+  'machine learning', 'ml engineer', 'ai engineer', 'data engineer',
+  'blockchain', 'web3', 'security engineer', 'cybersecurity',
+  'tech lead', 'technical lead', 'staff engineer', 'principal engineer',
+];
+
+/**
+ * Cheap title-based pre-filter — runs before any OpenAI call.
+ * Keeps jobs whose title matches a preferred-role keyword or a known tech term,
+ * and rejects jobs with obviously non-tech title words.
+ */
+function preFilterJobs(jobs, preferredRoles = []) {
+  // Extract individual words from preferred roles as extra keywords
+  const roleKeywords = preferredRoles
+    .flatMap(r => r.toLowerCase().split(/[\s\-\/]+/))
+    .filter(w => w.length > 2);
+
+  const filtered = jobs.filter(job => {
+    const title = job.title.toLowerCase();
+
+    // Hard reject: non-tech title words
+    if (REJECT_TITLE_WORDS.some(w => title.includes(w))) return false;
+
+    // Keep: title matches a preferred role keyword
+    if (roleKeywords.some(w => title.includes(w))) return true;
+
+    // Keep: title matches a generic tech keyword
+    return TECH_TITLE_WORDS.some(w => title.includes(w));
+  });
+
+  console.log(`[jobFetcher] Pre-filter: ${jobs.length} → ${filtered.length} jobs (removed ${jobs.length - filtered.length} non-tech)`);
+  return filtered;
+}
+
+// ── Normalise ─────────────────────────────────────────────────────────────────
+
 function normalise(job) {
   return {
     externalId: String(job.externalId),
@@ -16,13 +79,7 @@ function normalise(job) {
   };
 }
 
-function buildAdzunaQuery(preferredRoles) {
-  if (!preferredRoles || preferredRoles.length === 0) {
-    return 'backend developer software engineer';
-  }
-  // Use first 3 roles to build the query
-  return preferredRoles.slice(0, 3).join(' ').toLowerCase();
-}
+// ── Adzuna ────────────────────────────────────────────────────────────────────
 
 async function fetchAdzuna(preferredRoles) {
   if (!ADZUNA_APP_ID || !ADZUNA_APP_KEY) {
@@ -30,20 +87,37 @@ async function fetchAdzuna(preferredRoles) {
     return [];
   }
 
-  const query = encodeURIComponent(buildAdzunaQuery(preferredRoles));
-  const url = `https://api.adzuna.com/v1/api/jobs/in/search/1?app_id=${ADZUNA_APP_ID}&app_key=${ADZUNA_APP_KEY}&results_per_page=20&what=${query}&content-type=application/json`;
+  // Use what_or so any role keyword matches (AND was too restrictive → 0 results)
+  // Pick the first 5 roles, join with spaces — Adzuna treats spaces as OR in what_or
+  const whatOr = preferredRoles.length > 0
+    ? preferredRoles.slice(0, 5).join(' ')
+    : 'backend developer software engineer';
+
+  const params = new URLSearchParams({
+    app_id: ADZUNA_APP_ID,
+    app_key: ADZUNA_APP_KEY,
+    results_per_page: '50',
+    what_or: whatOr,       // OR match: any keyword hits → job included
+    sort_by: 'date',       // freshest first
+    'content-type': 'application/json',
+  });
+
+  const url = `https://api.adzuna.com/v1/api/jobs/in/search/1?${params}`;
 
   try {
     const res = await fetch(url);
     if (!res.ok) throw new Error(`Adzuna HTTP ${res.status}`);
     const data = await res.json();
 
+    console.log(`[jobFetcher] Adzuna returned ${(data.results || []).length} jobs`);
     return (data.results || []).map(j => normalise({
       externalId: `adzuna-${j.id}`,
       title: j.title,
       company: j.company?.display_name,
       location: j.location?.display_name,
-      salary: j.salary_min ? `${j.salary_min}–${j.salary_max}`.trim() : '',
+      salary: j.salary_min
+        ? `${Math.round(j.salary_min / 100000)}–${Math.round(j.salary_max / 100000)} LPA`
+        : '',
       description: j.description,
       applyUrl: j.redirect_url,
       source: 'adzuna',
@@ -54,44 +128,69 @@ async function fetchAdzuna(preferredRoles) {
   }
 }
 
-async function fetchRemotive(preferredRoles = []) {
-  try {
-    const searchTerm = preferredRoles.length > 0
-      ? encodeURIComponent(preferredRoles.slice(0, 2).join(' '))
-      : 'backend+developer';
-    const res = await fetch(`https://remotive.com/api/remote-jobs?category=software-dev&search=${searchTerm}&limit=20`);
-    if (!res.ok) throw new Error(`Remotive HTTP ${res.status}`);
-    const data = await res.json();
+// ── Remotive ──────────────────────────────────────────────────────────────────
+// Fetch by category only (no search term) — Remotive ignores category when
+// search is provided. We rely on our own title pre-filter instead.
 
-    return (data.jobs || []).map(j => normalise({
-      externalId: `remotive-${j.id}`,
-      title: j.title,
-      company: j.company_name,
-      location: j.candidate_required_location || 'Remote',
-      salary: j.salary || '',
-      description: j.description?.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim() || '',
-      applyUrl: j.url,
-      source: 'remotive',
-    }));
-  } catch (err) {
-    console.error('[jobFetcher] Remotive error:', err.message);
-    return [];
-  }
+const REMOTIVE_CATEGORIES = ['software-dev', 'devops-sysadmin'];
+
+async function fetchRemotive() {
+  const results = await Promise.all(
+    REMOTIVE_CATEGORIES.map(async category => {
+      try {
+        const res = await fetch(
+          `https://remotive.com/api/remote-jobs?category=${category}&limit=30`
+        );
+        if (!res.ok) throw new Error(`Remotive HTTP ${res.status}`);
+        const data = await res.json();
+        return (data.jobs || []).map(j => normalise({
+          externalId: `remotive-${j.id}`,
+          title: j.title,
+          company: j.company_name,
+          location: j.candidate_required_location || 'Remote',
+          salary: j.salary || '',
+          description: j.description?.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim() || '',
+          applyUrl: j.url,
+          source: 'remotive',
+        }));
+      } catch (err) {
+        console.error(`[jobFetcher] Remotive (${category}) error:`, err.message);
+        return [];
+      }
+    })
+  );
+
+  // Deduplicate across categories by externalId
+  const seen = new Set();
+  return results.flat().filter(j => {
+    if (seen.has(j.externalId)) return false;
+    seen.add(j.externalId);
+    return true;
+  });
 }
 
+// ── Main ──────────────────────────────────────────────────────────────────────
+
 /**
- * @param {Set} existingIds - external_ids already in DB for this user
- * @param {string[]} preferredRoles - user's selected job roles for Adzuna search
+ * @param {Set}      existingIds    - external_ids already in DB for this user
+ * @param {string[]} preferredRoles - user's selected job roles
  */
 async function fetchJobs(existingIds = new Set(), preferredRoles = []) {
   const [adzuna, remotive] = await Promise.all([
     fetchAdzuna(preferredRoles),
-    fetchRemotive(preferredRoles),
+    fetchRemotive(),
   ]);
+
   const all = [...adzuna, ...remotive];
+
+  // 1. Dedup against DB
   const fresh = all.filter(j => !existingIds.has(j.externalId));
-  console.log(`[jobFetcher] Fetched ${all.length} total, ${fresh.length} new after dedup`);
-  return fresh;
+
+  // 2. Cheap title pre-filter before any OpenAI call
+  const relevant = preFilterJobs(fresh, preferredRoles);
+
+  console.log(`[jobFetcher] Fetched ${all.length} total → ${fresh.length} new → ${relevant.length} after pre-filter`);
+  return relevant;
 }
 
 module.exports = { fetchJobs };

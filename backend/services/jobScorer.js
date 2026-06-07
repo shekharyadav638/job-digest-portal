@@ -22,7 +22,7 @@ Job listing:
 Title: ${job.title}
 Company: ${job.company}
 Location: ${job.location}
-Description: ${job.description.slice(0, 3000)}
+Description: ${job.description.slice(0, 1500)}
 
 Return this exact JSON:
 {
