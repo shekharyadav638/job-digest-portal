@@ -165,71 +165,56 @@ async function fetchJSearch(preferredRoles) {
   return jobs;
 }
 
-// ── RemoteOK ──────────────────────────────────────────────────────────────────
-// No auth needed. Tech-focused remote jobs.
+// ── The Muse ──────────────────────────────────────────────────────────────────
+// No auth needed. 500 req/hr. Entry Level filter perfect for SDE-1.
 
-const REMOTEOK_TAG_MAP = {
-  'node': 'node', 'node.js': 'node', 'express': 'node',
-  'react': 'react', 'frontend': 'react',
-  'python': 'python', 'django': 'python', 'flask': 'python',
-  'java': 'java', 'spring': 'java',
-  'golang': 'golang', 'go ': 'golang',
-  'ruby': 'ruby', 'rails': 'ruby',
-  'devops': 'devops', 'kubernetes': 'devops', 'docker': 'devops',
-  'backend': 'backend',
-  'typescript': 'typescript',
-  'php': 'php',
-  'kotlin': 'kotlin',
-  'swift': 'ios',
-  'android': 'android',
-};
-
-async function fetchRemoteOK(preferredRoles) {
-  const tags = new Set(['backend', 'software-engineer']);
-  for (const role of preferredRoles) {
-    const lower = role.toLowerCase();
-    for (const [key, tag] of Object.entries(REMOTEOK_TAG_MAP)) {
-      if (lower.includes(key)) tags.add(tag);
-    }
-  }
-
-  const tagList = [...tags].slice(0, 3);
+async function fetchTheMuse(preferredRoles) {
+  const pages = [0, 1, 2];
+  const locations = ['Flexible / Remote', 'India'];
   const seen = new Set();
   const jobs = [];
 
-  for (const tag of tagList) {
-    try {
-      const res = await fetch(`https://remoteok.com/api?tags=${tag}`, {
-        headers: {
-          'User-Agent': 'Mozilla/5.0 (compatible; JobDigestBot/1.0)',
-          'Accept': 'application/json',
-        },
-      });
-      if (!res.ok) {
-        console.warn(`[jobFetcher] RemoteOK HTTP ${res.status} for tag "${tag}"`);
-        continue;
+  for (const location of locations) {
+    for (const page of pages) {
+      try {
+        const params = new URLSearchParams({
+          category: 'Software Engineer',
+          level: 'Entry Level',
+          location,
+          page: String(page),
+        });
+        const res = await fetch(`https://www.themuse.com/api/public/jobs?${params}`, {
+          headers: { 'Accept': 'application/json' },
+        });
+        if (!res.ok) {
+          console.warn(`[jobFetcher] TheMuse HTTP ${res.status}`);
+          break;
+        }
+        const data = await res.json();
+        const list = data.results || [];
+        if (list.length === 0) break; // no more pages
+
+        for (const j of list) {
+          const id = j.id;
+          if (!id || seen.has(String(id))) continue;
+          seen.add(String(id));
+          const loc = (j.locations || []).map(l => l.name).join(', ') || 'Remote';
+          jobs.push(normalise({
+            externalId: `themuse-${id}`,
+            title: j.name, company: j.company?.name || '',
+            location: loc, salary: '',
+            description: j.contents ? stripHtml(j.contents) : '',
+            applyUrl: j.refs?.landing_page || '', source: 'themuse',
+          }));
+        }
+      } catch (err) {
+        console.error(`[jobFetcher] TheMuse error:`, err.message);
+        break;
       }
-      const data = await res.json();
-      const arr = Array.isArray(data) ? data.slice(1) : []; // index 0 is legal notice
-      for (const j of arr) {
-        const id = j.id || j.slug;
-        if (!id || seen.has(String(id))) continue;
-        seen.add(String(id));
-        jobs.push(normalise({
-          externalId: `remoteok-${id}`,
-          title: j.position || j.title, company: j.company,
-          location: j.location || 'Remote',
-          salary: j.salary || '',
-          description: j.description ? stripHtml(j.description) : (j.tags || []).join(', '),
-          applyUrl: j.apply_url || j.url, source: 'remoteok',
-        }));
-      }
-    } catch (err) {
-      console.error(`[jobFetcher] RemoteOK error for tag "${tag}":`, err.message);
     }
   }
 
-  console.log(`[jobFetcher] RemoteOK: ${jobs.length} jobs`);
+  console.log(`[jobFetcher] TheMuse: ${jobs.length} jobs`);
   return jobs;
 }
 
@@ -258,6 +243,7 @@ async function fetchHimalayas(preferredRoles) {
       const data = await res.json();
       // Response may be { jobs: [...] } or { data: [...] } or plain array
       const list = data.jobs || data.data || (Array.isArray(data) ? data : []);
+      if (list.length === 0) console.warn(`[jobFetcher] Himalayas empty response for ${url}:`, JSON.stringify(data).slice(0, 300));
       for (const j of list) {
         const id = j.id || j.slug;
         if (!id || seen.has(String(id))) continue;
@@ -299,7 +285,7 @@ async function fetchJobicy(preferredRoles) {
 
   for (const tag of tagsToFetch) {
     try {
-      const url = `https://jobicy.com/api/v2/remote-jobs?count=50&industry=software-development&tag=${tag}`;
+      const url = `https://jobicy.com/api/v2/remote-jobs?count=50&tag=${tag}`;
       const res = await fetch(url, { headers: { 'Accept': 'application/json' } });
       if (!res.ok) {
         console.warn(`[jobFetcher] Jobicy HTTP ${res.status} for tag "${tag}"`);
@@ -371,19 +357,19 @@ async function fetchRemotive() {
 
 async function fetchJobs(existingIds = new Set(), preferredRoles = []) {
   // All sources fire in parallel
-  const [adzuna, jsearch, remoteok, himalayas, jobicy, remotive] = await Promise.allSettled([
+  const [adzuna, jsearch, themuse, himalayas, jobicy, remotive] = await Promise.allSettled([
     fetchAdzuna(preferredRoles),
     fetchJSearch(preferredRoles),
-    fetchRemoteOK(preferredRoles),
+    fetchTheMuse(preferredRoles),
     fetchHimalayas(preferredRoles),
     fetchJobicy(preferredRoles),
     fetchRemotive(),
   ]);
 
   const all = [
-    ...(adzuna.status    === 'fulfilled' ? adzuna.value    : []),
-    ...(jsearch.status   === 'fulfilled' ? jsearch.value   : []),
-    ...(remoteok.status  === 'fulfilled' ? remoteok.value  : []),
+    ...(adzuna.status   === 'fulfilled' ? adzuna.value   : []),
+    ...(jsearch.status  === 'fulfilled' ? jsearch.value  : []),
+    ...(themuse.status   === 'fulfilled' ? themuse.value   : []),
     ...(himalayas.status === 'fulfilled' ? himalayas.value : []),
     ...(jobicy.status    === 'fulfilled' ? jobicy.value    : []),
     ...(remotive.status  === 'fulfilled' ? remotive.value  : []),
