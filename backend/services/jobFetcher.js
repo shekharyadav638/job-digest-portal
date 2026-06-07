@@ -1,11 +1,11 @@
 require('dotenv').config({ path: require('path').join(__dirname, '../.env') });
 
-const ADZUNA_APP_ID = process.env.ADZUNA_APP_ID;
+const ADZUNA_APP_ID  = process.env.ADZUNA_APP_ID;
 const ADZUNA_APP_KEY = process.env.ADZUNA_APP_KEY;
+const JSEARCH_API_KEY = process.env.JSEARCH_API_KEY; // optional — openwebninja.com free key
 
-// ── Pre-filter config ─────────────────────────────────────────────────────────
+// ── Pre-filter ────────────────────────────────────────────────────────────────
 
-// If ANY of these appear in the title → reject immediately (not a tech role)
 const REJECT_TITLE_WORDS = [
   'writer', 'copywriter', 'editor', 'proofreader', 'translator',
   'sales', 'account executive', 'account manager', 'business development',
@@ -19,10 +19,9 @@ const REJECT_TITLE_WORDS = [
   'operations manager', 'director of revenue', 'director of sales',
   'inside sales', 'head of sales', 'vp of sales',
   'tutor', 'teacher', 'instructor', 'coach',
-  'cinematic', 'freelance writer',
+  'cinematic', 'freelance writer', 'product manager', 'project manager',
 ];
 
-// If ANY of these appear in the title → keep (generic tech terms)
 const TECH_TITLE_WORDS = [
   'engineer', 'developer', 'dev ', 'software', 'backend', 'front-end', 'frontend',
   'fullstack', 'full-stack', 'full stack', 'programmer', 'architect',
@@ -36,31 +35,19 @@ const TECH_TITLE_WORDS = [
   'tech lead', 'technical lead', 'staff engineer', 'principal engineer',
 ];
 
-/**
- * Cheap title-based pre-filter — runs before any OpenAI call.
- * Keeps jobs whose title matches a preferred-role keyword or a known tech term,
- * and rejects jobs with obviously non-tech title words.
- */
 function preFilterJobs(jobs, preferredRoles = []) {
-  // Extract individual words from preferred roles as extra keywords
   const roleKeywords = preferredRoles
     .flatMap(r => r.toLowerCase().split(/[\s\-\/]+/))
     .filter(w => w.length > 2);
 
   const filtered = jobs.filter(job => {
     const title = job.title.toLowerCase();
-
-    // Hard reject: non-tech title words
     if (REJECT_TITLE_WORDS.some(w => title.includes(w))) return false;
-
-    // Keep: title matches a preferred role keyword
     if (roleKeywords.some(w => title.includes(w))) return true;
-
-    // Keep: title matches a generic tech keyword
     return TECH_TITLE_WORDS.some(w => title.includes(w));
   });
 
-  console.log(`[jobFetcher] Pre-filter: ${jobs.length} → ${filtered.length} jobs (removed ${jobs.length - filtered.length} non-tech)`);
+  console.log(`[jobFetcher] Pre-filter: ${jobs.length} → ${filtered.length} (removed ${jobs.length - filtered.length} non-tech)`);
   return filtered;
 }
 
@@ -69,46 +56,31 @@ function preFilterJobs(jobs, preferredRoles = []) {
 function normalise(job) {
   return {
     externalId: String(job.externalId),
-    title: job.title || '',
-    company: job.company || '',
-    location: job.location || '',
-    salary: job.salary || '',
-    description: job.description || '',
-    applyUrl: job.applyUrl || '',
-    source: job.source,
+    title:      job.title       || '',
+    company:    job.company     || '',
+    location:   job.location    || '',
+    salary:     job.salary      || '',
+    description:job.description || '',
+    applyUrl:   job.applyUrl    || '',
+    source:     job.source,
   };
 }
 
-// ── Adzuna ────────────────────────────────────────────────────────────────────
-
-function adzunaJob(j) {
-  return normalise({
-    externalId: `adzuna-${j.id}`,
-    title: j.title,
-    company: j.company?.display_name,
-    location: j.location?.display_name,
-    salary: j.salary_min
-      ? `${Math.round(j.salary_min / 100000)}–${Math.round(j.salary_max / 100000)} LPA`
-      : '',
-    description: j.description,
-    applyUrl: j.redirect_url,
-    source: 'adzuna',
-  });
+function stripHtml(str = '') {
+  return str.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim();
 }
+
+// ── Adzuna (India) ────────────────────────────────────────────────────────────
 
 async function fetchAdzunaPage(page, whatOr) {
   const params = new URLSearchParams({
-    app_id: ADZUNA_APP_ID,
-    app_key: ADZUNA_APP_KEY,
-    results_per_page: '50',
-    what_or: whatOr,
-    sort_by: 'date',
+    app_id: ADZUNA_APP_ID, app_key: ADZUNA_APP_KEY,
+    results_per_page: '50', what_or: whatOr, sort_by: 'date',
     'content-type': 'application/json',
   });
   const res = await fetch(`https://api.adzuna.com/v1/api/jobs/in/search/${page}?${params}`);
-  if (!res.ok) throw new Error(`Adzuna page ${page} HTTP ${res.status}`);
-  const data = await res.json();
-  return data.results || [];
+  if (!res.ok) throw new Error(`Adzuna p${page} HTTP ${res.status}`);
+  return (await res.json()).results || [];
 }
 
 async function fetchAdzuna(preferredRoles) {
@@ -116,110 +88,273 @@ async function fetchAdzuna(preferredRoles) {
     console.warn('[jobFetcher] Adzuna credentials missing, skipping');
     return [];
   }
-
-  // Run two queries in parallel:
-  // 1. preferred roles (OR match)
-  // 2. tech stack keywords — catches more specific listings
   const roleQuery = preferredRoles.length > 0
     ? preferredRoles.slice(0, 5).join(' ')
     : 'backend developer software engineer';
+  const techQuery = 'node.js python java spring backend developer software engineer';
 
-  const techQuery = 'node.js express python django java spring backend developer';
+  const settled = await Promise.allSettled([
+    fetchAdzunaPage(1, roleQuery),
+    fetchAdzunaPage(2, roleQuery),
+    fetchAdzunaPage(3, roleQuery),
+    fetchAdzunaPage(1, techQuery),
+  ]);
 
-  try {
-    // Fetch pages 1-3 for role query + page 1 for tech query — all in parallel
-    const [r1, r2, r3, t1] = await Promise.allSettled([
-      fetchAdzunaPage(1, roleQuery),
-      fetchAdzunaPage(2, roleQuery),
-      fetchAdzunaPage(3, roleQuery),
-      fetchAdzunaPage(1, techQuery),
-    ]);
+  const raw = settled.flatMap(r => r.status === 'fulfilled' ? r.value : []);
+  const seen = new Set();
+  const unique = raw.filter(j => { if (seen.has(j.id)) return false; seen.add(j.id); return true; });
 
-    const raw = [
-      ...(r1.status === 'fulfilled' ? r1.value : []),
-      ...(r2.status === 'fulfilled' ? r2.value : []),
-      ...(r3.status === 'fulfilled' ? r3.value : []),
-      ...(t1.status === 'fulfilled' ? t1.value : []),
-    ];
+  console.log(`[jobFetcher] Adzuna: ${unique.length} jobs`);
+  return unique.map(j => normalise({
+    externalId: `adzuna-${j.id}`,
+    title: j.title, company: j.company?.display_name,
+    location: j.location?.display_name,
+    salary: j.salary_min ? `${Math.round(j.salary_min/100000)}–${Math.round(j.salary_max/100000)} LPA` : '',
+    description: j.description, applyUrl: j.redirect_url, source: 'adzuna',
+  }));
+}
 
-    // Deduplicate by Adzuna job id
-    const seen = new Set();
-    const unique = raw.filter(j => {
-      if (seen.has(j.id)) return false;
-      seen.add(j.id);
-      return true;
-    });
+// ── JSearch — Google for Jobs (indexes Naukri, LinkedIn India, Indeed India) ──
+// Free key: https://openwebninja.com  (200 req/month free)
 
-    console.log(`[jobFetcher] Adzuna returned ${unique.length} jobs (across 4 queries)`);
-    return unique.map(adzunaJob);
-  } catch (err) {
-    console.error('[jobFetcher] Adzuna error:', err.message);
-    return [];
+async function fetchJSearch(preferredRoles) {
+  if (!JSEARCH_API_KEY) return [];
+
+  const queries = [
+    `${preferredRoles.slice(0, 2).join(' OR ')} in India`,
+    `remote ${preferredRoles[0] || 'software engineer'}`,
+  ];
+
+  const settled = await Promise.allSettled(queries.map(q =>
+    fetch(`https://api.openwebninja.com/jsearch/search-v2?query=${encodeURIComponent(q)}&country=in&num_pages=1`, {
+      headers: { 'x-api-key': JSEARCH_API_KEY },
+    }).then(r => r.ok ? r.json() : Promise.reject(`JSearch HTTP ${r.status}`))
+  ));
+
+  const raw = settled.flatMap(r => r.status === 'fulfilled' ? (r.value.data || []) : []);
+  const seen = new Set();
+  const unique = raw.filter(j => { if (seen.has(j.job_id)) return false; seen.add(j.job_id); return true; });
+
+  console.log(`[jobFetcher] JSearch: ${unique.length} jobs`);
+  return unique.map(j => normalise({
+    externalId: `jsearch-${j.job_id}`,
+    title: j.job_title, company: j.employer_name,
+    location: j.job_city ? `${j.job_city}, ${j.job_country}` : (j.job_country || 'India'),
+    salary: j.job_salary_currency
+      ? `${j.job_salary_currency}${j.job_min_salary || ''}–${j.job_max_salary || ''}`
+      : '',
+    description: j.job_description?.slice(0, 2000) || '',
+    applyUrl: j.job_apply_link, source: 'jsearch',
+  }));
+}
+
+// ── RemoteOK ──────────────────────────────────────────────────────────────────
+// No auth needed. Tech-focused remote jobs.
+
+const REMOTEOK_TAG_MAP = {
+  'node': 'node', 'node.js': 'node', 'express': 'node',
+  'react': 'react', 'frontend': 'react',
+  'python': 'python', 'django': 'python', 'flask': 'python',
+  'java': 'java', 'spring': 'java',
+  'golang': 'golang', 'go ': 'golang',
+  'ruby': 'ruby', 'rails': 'ruby',
+  'devops': 'devops', 'kubernetes': 'devops', 'docker': 'devops',
+  'backend': 'backend',
+  'typescript': 'typescript',
+  'php': 'php',
+  'kotlin': 'kotlin',
+  'swift': 'ios',
+  'android': 'android',
+};
+
+async function fetchRemoteOK(preferredRoles) {
+  // Map preferred roles to RemoteOK tags
+  const tags = new Set(['backend', 'software']);
+  for (const role of preferredRoles) {
+    const lower = role.toLowerCase();
+    for (const [key, tag] of Object.entries(REMOTEOK_TAG_MAP)) {
+      if (lower.includes(key)) tags.add(tag);
+    }
   }
+
+  const tagList = [...tags].slice(0, 4);
+  const settled = await Promise.allSettled(
+    tagList.map(tag =>
+      fetch(`https://remoteok.com/api?tags=${tag}`, {
+        headers: { 'User-Agent': 'JobDigestPortal/1.0 (job-digest-portal)' },
+      }).then(r => r.ok ? r.json() : Promise.reject(`RemoteOK HTTP ${r.status}`))
+    )
+  );
+
+  const seen = new Set();
+  const jobs = [];
+  for (const r of settled) {
+    if (r.status !== 'fulfilled') continue;
+    const arr = Array.isArray(r.value) ? r.value.slice(1) : []; // skip legal notice at index 0
+    for (const j of arr) {
+      if (!j.id || seen.has(j.id)) continue;
+      seen.add(j.id);
+      jobs.push(normalise({
+        externalId: `remoteok-${j.id}`,
+        title: j.position, company: j.company,
+        location: j.location || 'Remote',
+        salary: j.salary || '',
+        description: j.description ? stripHtml(j.description) : (j.tags || []).join(', '),
+        applyUrl: j.url, source: 'remoteok',
+      }));
+    }
+  }
+
+  console.log(`[jobFetcher] RemoteOK: ${jobs.length} jobs`);
+  return jobs;
+}
+
+// ── Himalayas ─────────────────────────────────────────────────────────────────
+// No auth needed. Has seniority=Junior filter — great for SDE-1.
+
+async function fetchHimalayas(preferredRoles) {
+  const query = preferredRoles.slice(0, 2).join(' ') || 'software engineer';
+  const settled = await Promise.allSettled([
+    fetch(`https://himalayas.app/jobs/api/search?q=${encodeURIComponent(query)}&seniority=Junior&sort=recent`).then(r => r.ok ? r.json() : Promise.reject()),
+    fetch(`https://himalayas.app/jobs/api/search?q=${encodeURIComponent('backend developer')}&seniority=Junior&sort=recent`).then(r => r.ok ? r.json() : Promise.reject()),
+  ]);
+
+  const seen = new Set();
+  const jobs = [];
+  for (const r of settled) {
+    if (r.status !== 'fulfilled') continue;
+    for (const j of (r.value.jobs || [])) {
+      if (!j.id || seen.has(j.id)) continue;
+      seen.add(j.id);
+      jobs.push(normalise({
+        externalId: `himalayas-${j.id}`,
+        title: j.title, company: j.company?.name || j.companyName || '',
+        location: (j.locationRestrictions || []).join(', ') || 'Remote',
+        salary: j.salaryRange || j.salary || '',
+        description: j.description ? stripHtml(j.description) : '',
+        applyUrl: j.applicationLink || j.applyLink || j.url || '',
+        source: 'himalayas',
+      }));
+    }
+  }
+
+  console.log(`[jobFetcher] Himalayas: ${jobs.length} jobs`);
+  return jobs;
+}
+
+// ── Jobicy ────────────────────────────────────────────────────────────────────
+// No auth needed. Good industry + tag filtering.
+
+async function fetchJobicy(preferredRoles) {
+  const techTags = ['backend', 'node', 'python', 'java', 'devops', 'fullstack'];
+
+  // Pick tags from preferred roles if possible
+  const matchedTags = techTags.filter(tag =>
+    preferredRoles.some(r => r.toLowerCase().includes(tag))
+  );
+  const tagsToFetch = matchedTags.length > 0 ? matchedTags.slice(0, 2) : ['backend', 'node'];
+
+  const settled = await Promise.allSettled(
+    tagsToFetch.map(tag =>
+      fetch(`https://jobicy.com/api/v2/remote-jobs?count=50&industry=software-development&tag=${tag}`)
+        .then(r => r.ok ? r.json() : Promise.reject(`Jobicy HTTP ${r.status}`))
+    )
+  );
+
+  const seen = new Set();
+  const jobs = [];
+  for (const r of settled) {
+    if (r.status !== 'fulfilled') continue;
+    for (const j of (r.value.jobs || [])) {
+      if (!j.id || seen.has(j.id)) continue;
+      seen.add(j.id);
+      jobs.push(normalise({
+        externalId: `jobicy-${j.id}`,
+        title: j.jobTitle, company: j.companyName,
+        location: j.jobGeo || 'Remote',
+        salary: j.annualSalaryMin
+          ? `$${Math.round(j.annualSalaryMin/1000)}k–$${Math.round(j.annualSalaryMax/1000)}k`
+          : '',
+        description: stripHtml(j.jobDescription || ''),
+        applyUrl: j.url, source: 'jobicy',
+      }));
+    }
+  }
+
+  console.log(`[jobFetcher] Jobicy: ${jobs.length} jobs`);
+  return jobs;
 }
 
 // ── Remotive ──────────────────────────────────────────────────────────────────
-// Fetch by category only (no search term) — Remotive ignores category when
-// search is provided. We rely on our own title pre-filter instead.
-
-const REMOTIVE_CATEGORIES = ['software-dev', 'devops-sysadmin'];
 
 async function fetchRemotive() {
-  const results = await Promise.all(
-    REMOTIVE_CATEGORIES.map(async category => {
-      try {
-        const res = await fetch(
-          `https://remotive.com/api/remote-jobs?category=${category}&limit=30`
-        );
-        if (!res.ok) throw new Error(`Remotive HTTP ${res.status}`);
-        const data = await res.json();
-        return (data.jobs || []).map(j => normalise({
-          externalId: `remotive-${j.id}`,
-          title: j.title,
-          company: j.company_name,
-          location: j.candidate_required_location || 'Remote',
-          salary: j.salary || '',
-          description: j.description?.replace(/<[^>]*>/g, ' ').replace(/\s+/g, ' ').trim() || '',
-          applyUrl: j.url,
-          source: 'remotive',
-        }));
-      } catch (err) {
-        console.error(`[jobFetcher] Remotive (${category}) error:`, err.message);
-        return [];
-      }
-    })
+  const categories = ['software-dev', 'devops-sysadmin'];
+  const settled = await Promise.allSettled(
+    categories.map(cat =>
+      fetch(`https://remotive.com/api/remote-jobs?category=${cat}&limit=30`)
+        .then(r => r.ok ? r.json() : Promise.reject(`Remotive HTTP ${r.status}`))
+    )
   );
 
-  // Deduplicate across categories by externalId
   const seen = new Set();
-  return results.flat().filter(j => {
-    if (seen.has(j.externalId)) return false;
-    seen.add(j.externalId);
-    return true;
-  });
+  const jobs = [];
+  for (const r of settled) {
+    if (r.status !== 'fulfilled') continue;
+    for (const j of (r.value.jobs || [])) {
+      if (seen.has(j.id)) continue;
+      seen.add(j.id);
+      jobs.push(normalise({
+        externalId: `remotive-${j.id}`,
+        title: j.title, company: j.company_name,
+        location: j.candidate_required_location || 'Remote',
+        salary: j.salary || '',
+        description: stripHtml(j.description || ''),
+        applyUrl: j.url, source: 'remotive',
+      }));
+    }
+  }
+
+  console.log(`[jobFetcher] Remotive: ${jobs.length} jobs`);
+  return jobs;
 }
 
 // ── Main ──────────────────────────────────────────────────────────────────────
 
-/**
- * @param {Set}      existingIds    - external_ids already in DB for this user
- * @param {string[]} preferredRoles - user's selected job roles
- */
 async function fetchJobs(existingIds = new Set(), preferredRoles = []) {
-  const [adzuna, remotive] = await Promise.all([
+  // All sources fire in parallel
+  const [adzuna, jsearch, remoteok, himalayas, jobicy, remotive] = await Promise.allSettled([
     fetchAdzuna(preferredRoles),
+    fetchJSearch(preferredRoles),
+    fetchRemoteOK(preferredRoles),
+    fetchHimalayas(preferredRoles),
+    fetchJobicy(preferredRoles),
     fetchRemotive(),
   ]);
 
-  const all = [...adzuna, ...remotive];
+  const all = [
+    ...(adzuna.status    === 'fulfilled' ? adzuna.value    : []),
+    ...(jsearch.status   === 'fulfilled' ? jsearch.value   : []),
+    ...(remoteok.status  === 'fulfilled' ? remoteok.value  : []),
+    ...(himalayas.status === 'fulfilled' ? himalayas.value : []),
+    ...(jobicy.status    === 'fulfilled' ? jobicy.value    : []),
+    ...(remotive.status  === 'fulfilled' ? remotive.value  : []),
+  ];
 
-  // 1. Dedup against DB
-  const fresh = all.filter(j => !existingIds.has(j.externalId));
+  // Dedup across sources by externalId
+  const seenIds = new Set();
+  const deduped = all.filter(j => {
+    if (seenIds.has(j.externalId)) return false;
+    seenIds.add(j.externalId);
+    return true;
+  });
 
-  // 2. Cheap title pre-filter before any OpenAI call
+  // Remove jobs already in DB for this user
+  const fresh = deduped.filter(j => !existingIds.has(j.externalId));
+
+  // Cheap title pre-filter before any OpenAI call
   const relevant = preFilterJobs(fresh, preferredRoles);
 
-  console.log(`[jobFetcher] Fetched ${all.length} total → ${fresh.length} new → ${relevant.length} after pre-filter`);
+  console.log(`[jobFetcher] Total: ${all.length} → deduped: ${deduped.length} → new: ${fresh.length} → relevant: ${relevant.length}`);
   return relevant;
 }
 
