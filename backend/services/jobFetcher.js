@@ -142,7 +142,7 @@ async function fetchJSearch(preferredRoles) {
         continue;
       }
       const data = await res.json();
-      if (!data.data) {
+      if (!Array.isArray(data.data)) {
         console.warn('[jobFetcher] JSearch unexpected response shape:', JSON.stringify(data).slice(0, 200));
         continue;
       }
@@ -171,7 +171,7 @@ async function fetchJSearch(preferredRoles) {
 // ── The Muse ──────────────────────────────────────────────────────────────────
 // No auth needed. 500 req/hr. Entry Level filter perfect for SDE-1.
 
-async function fetchTheMuse(preferredRoles) {
+async function fetchTheMuse(_preferredRoles) {
   const pages = [0, 1, 2];
   const locations = ['Flexible / Remote', 'India'];
   const seen = new Set();
@@ -247,13 +247,15 @@ async function fetchHimalayas(preferredRoles) {
       const list = data.jobs || data.data || (Array.isArray(data) ? data : []);
       if (list.length === 0) console.warn(`[jobFetcher] Himalayas empty response for ${url}:`, JSON.stringify(data).slice(0, 300));
       for (const j of list) {
-        const id = j.id || j.slug;
+        // Himalayas jobs have no top-level id/slug; derive from applicationLink
+        const id = j.id || j.slug ||
+          (j.applicationLink ? j.applicationLink.split('/').pop() : null);
         if (!id || seen.has(String(id))) continue;
         seen.add(String(id));
         jobs.push(normalise({
           externalId: `himalayas-${id}`,
           title: j.title,
-          company: typeof j.company === 'string' ? j.company : (j.company?.name || j.companyName || ''),
+          company: j.companyName || (typeof j.company === 'string' ? j.company : (j.company?.name || '')),
           location: Array.isArray(j.locationRestrictions)
             ? j.locationRestrictions.join(', ')
             : (j.location || j.jobGeo || 'Remote'),
