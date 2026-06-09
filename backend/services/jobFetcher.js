@@ -97,7 +97,10 @@ async function fetchAdzuna(preferredRoles) {
     fetchAdzunaPage(1, roleQuery),
     fetchAdzunaPage(2, roleQuery),
     fetchAdzunaPage(3, roleQuery),
+    fetchAdzunaPage(4, roleQuery),
+    fetchAdzunaPage(5, roleQuery),
     fetchAdzunaPage(1, techQuery),
+    fetchAdzunaPage(2, techQuery),
   ]);
 
   const raw = settled.flatMap(r => r.status === 'fulfilled' ? r.value : []);
@@ -224,10 +227,9 @@ async function fetchTheMuse(preferredRoles) {
 async function fetchHimalayas(preferredRoles) {
   const query = preferredRoles.slice(0, 2).join(' ') || 'software engineer';
   const urls = [
-    // Search with seniority filter
     `https://himalayas.app/jobs/api/search?q=${encodeURIComponent(query)}&sort=recent`,
-    // Browse all — no filter, more results
-    `https://himalayas.app/jobs/api?offset=0&limit=20`,
+    `https://himalayas.app/jobs/api?offset=0&limit=50`,
+    `https://himalayas.app/jobs/api?offset=50&limit=50`,
   ];
 
   const seen = new Set();
@@ -274,11 +276,11 @@ async function fetchHimalayas(preferredRoles) {
 // No auth needed. Good industry + tag filtering.
 
 async function fetchJobicy(preferredRoles) {
-  const techTags = ['backend', 'node', 'python', 'java', 'devops', 'fullstack'];
+  const techTags = ['backend', 'node', 'python', 'java', 'devops', 'fullstack', 'react', 'software-engineer'];
   const matchedTags = techTags.filter(tag =>
     preferredRoles.some(r => r.toLowerCase().includes(tag))
   );
-  const tagsToFetch = matchedTags.length > 0 ? matchedTags.slice(0, 2) : ['backend', 'node'];
+  const tagsToFetch = matchedTags.length > 0 ? matchedTags.slice(0, 3) : ['backend', 'node', 'software-engineer'];
 
   const seen = new Set();
   const jobs = [];
@@ -323,10 +325,10 @@ async function fetchJobicy(preferredRoles) {
 // ── Remotive ──────────────────────────────────────────────────────────────────
 
 async function fetchRemotive() {
-  const categories = ['software-dev', 'devops-sysadmin'];
+  const categories = ['software-dev', 'devops-sysadmin', 'data'];
   const settled = await Promise.allSettled(
     categories.map(cat =>
-      fetch(`https://remotive.com/api/remote-jobs?category=${cat}&limit=30`)
+      fetch(`https://remotive.com/api/remote-jobs?category=${cat}&limit=50`)
         .then(r => r.ok ? r.json() : Promise.reject(`Remotive HTTP ${r.status}`))
     )
   );
@@ -353,26 +355,74 @@ async function fetchRemotive() {
   return jobs;
 }
 
+// ── Arbeitnow ─────────────────────────────────────────────────────────────────
+// Free, no auth. Good remote tech jobs. https://www.arbeitnow.com/api/job-board-api
+
+async function fetchArbeitnow(preferredRoles) {
+  const tags = preferredRoles
+    .flatMap(r => r.toLowerCase().split(/\s+/))
+    .filter(w => w.length > 3)
+    .map(w => w.replace(/[^a-z0-9-]/g, ''));
+  const queries = tags.length > 0 ? tags.slice(0, 2) : ['backend', 'software-engineer'];
+
+  const seen = new Set();
+  const jobs = [];
+
+  for (const tag of queries) {
+    try {
+      const res = await fetch(`https://www.arbeitnow.com/api/job-board-api?tag=${encodeURIComponent(tag)}`, {
+        headers: { 'Accept': 'application/json' },
+      });
+      if (!res.ok) {
+        console.warn(`[jobFetcher] Arbeitnow HTTP ${res.status} for tag "${tag}"`);
+        continue;
+      }
+      const data = await res.json();
+      for (const j of (data.data || [])) {
+        if (!j.slug || seen.has(j.slug)) continue;
+        seen.add(j.slug);
+        jobs.push(normalise({
+          externalId: `arbeitnow-${j.slug}`,
+          title: j.title,
+          company: j.company_name,
+          location: j.location || (j.remote ? 'Remote' : ''),
+          salary: '',
+          description: stripHtml(j.description || ''),
+          applyUrl: j.url,
+          source: 'arbeitnow',
+        }));
+      }
+    } catch (err) {
+      console.error(`[jobFetcher] Arbeitnow error for tag "${tag}":`, err.message);
+    }
+  }
+
+  console.log(`[jobFetcher] Arbeitnow: ${jobs.length} jobs`);
+  return jobs;
+}
+
 // ── Main ──────────────────────────────────────────────────────────────────────
 
 async function fetchJobs(existingIds = new Set(), preferredRoles = []) {
   // All sources fire in parallel
-  const [adzuna, jsearch, themuse, himalayas, jobicy, remotive] = await Promise.allSettled([
+  const [adzuna, jsearch, themuse, himalayas, jobicy, remotive, arbeitnow] = await Promise.allSettled([
     fetchAdzuna(preferredRoles),
     fetchJSearch(preferredRoles),
     fetchTheMuse(preferredRoles),
     fetchHimalayas(preferredRoles),
     fetchJobicy(preferredRoles),
     fetchRemotive(),
+    fetchArbeitnow(preferredRoles),
   ]);
 
   const all = [
-    ...(adzuna.status   === 'fulfilled' ? adzuna.value   : []),
-    ...(jsearch.status  === 'fulfilled' ? jsearch.value  : []),
+    ...(adzuna.status    === 'fulfilled' ? adzuna.value    : []),
+    ...(jsearch.status   === 'fulfilled' ? jsearch.value   : []),
     ...(themuse.status   === 'fulfilled' ? themuse.value   : []),
     ...(himalayas.status === 'fulfilled' ? himalayas.value : []),
     ...(jobicy.status    === 'fulfilled' ? jobicy.value    : []),
     ...(remotive.status  === 'fulfilled' ? remotive.value  : []),
+    ...(arbeitnow.status === 'fulfilled' ? arbeitnow.value : []),
   ];
 
   // Dedup across sources by externalId

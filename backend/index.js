@@ -50,7 +50,7 @@ app.post('/api/cron/run', async (req, res) => {
   }
 });
 
-app.get('/api/health', (req, res) => res.json({ status: 'ok', time: new Date().toISOString() }));
+app.get('/api/health', (_req, res) => res.json({ status: 'ok', time: new Date().toISOString() }));
 
 async function start() {
   await initDb();
@@ -59,15 +59,33 @@ async function start() {
   cron.schedule(cronSchedule, async () => {
     console.log('[cron] Running daily digest for all users...');
     try {
-      await runDailyDigest(); // runs for all users with setup_complete=1
+      await runDailyDigest();
     } catch (err) {
       console.error('[cron] Digest failed:', err.message);
     }
   });
   console.log(`[cron] Scheduled: ${cronSchedule}`);
 
+  // Keep-alive: ping own health endpoint every 14 min so Render free tier doesn't sleep.
+  // Set SELF_URL=https://your-app.onrender.com in Render env vars to enable.
+  const selfUrl = process.env.SELF_URL;
+  if (selfUrl) {
+    setInterval(async () => {
+      try {
+        await fetch(`${selfUrl}/api/health`);
+        console.log('[keepalive] Pinged self');
+      } catch (e) {
+        console.warn('[keepalive] Ping failed:', e.message);
+      }
+    }, 14 * 60 * 1000);
+    console.log(`[keepalive] Self-ping enabled → ${selfUrl}/api/health`);
+  }
+
   app.listen(PORT, () => {
     console.log(`[server] Backend running at http://localhost:${PORT}`);
+    if (selfUrl) {
+      console.log(`[cron] External trigger URL: POST ${selfUrl}/api/cron/run  (header: x-cron-secret: <CRON_SECRET>)`);
+    }
   });
 }
 

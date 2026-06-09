@@ -110,27 +110,39 @@ async function insertJob(job) {
 
 async function getJobs(userId, { date, applied } = {}) {
   const db = getDb();
-  const today = date || new Date().toISOString().split('T')[0];
 
-  if (isPg()) {
-    let query = 'SELECT * FROM jobs WHERE user_id = $1 AND fetched_date = $2';
-    const params = [userId, today];
-    if (applied !== undefined) {
-      query += ` AND applied = $3`;
-      params.push(applied ? 1 : 0);
+  // Specific date requested — return only that day (historical browsing)
+  if (date) {
+    if (isPg()) {
+      let query = 'SELECT * FROM jobs WHERE user_id = $1 AND fetched_date = $2';
+      const params = [userId, date];
+      if (applied !== undefined) { query += ' AND applied = $3'; params.push(applied ? 1 : 0); }
+      query += ' ORDER BY match_score DESC';
+      const res = await db.query(query, params);
+      return res.rows;
     }
+    let query = 'SELECT * FROM jobs WHERE user_id = ? AND fetched_date = ?';
+    const params = [userId, date];
+    if (applied !== undefined) { query += ' AND applied = ?'; params.push(applied ? 1 : 0); }
     query += ' ORDER BY match_score DESC';
+    return db.prepare(query).all(...params);
+  }
+
+  // No date: return ALL jobs for the user so pending items carry across days
+  // and applied history is always visible. Pending first (score desc), then applied (applied_at desc).
+  if (isPg()) {
+    let query = 'SELECT * FROM jobs WHERE user_id = $1';
+    const params = [userId];
+    if (applied !== undefined) { query += ' AND applied = $2'; params.push(applied ? 1 : 0); }
+    query += ' ORDER BY applied ASC, match_score DESC';
     const res = await db.query(query, params);
     return res.rows;
   }
 
-  let query = 'SELECT * FROM jobs WHERE user_id = ? AND fetched_date = ?';
-  const params = [userId, today];
-  if (applied !== undefined) {
-    query += ' AND applied = ?';
-    params.push(applied ? 1 : 0);
-  }
-  query += ' ORDER BY match_score DESC';
+  let query = 'SELECT * FROM jobs WHERE user_id = ?';
+  const params = [userId];
+  if (applied !== undefined) { query += ' AND applied = ?'; params.push(applied ? 1 : 0); }
+  query += ' ORDER BY applied ASC, match_score DESC';
   return db.prepare(query).all(...params);
 }
 

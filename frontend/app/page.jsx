@@ -28,6 +28,10 @@ export default function Dashboard() {
     weekday: 'long', year: 'numeric', month: 'long', day: 'numeric',
   });
 
+  // True when no jobs were fetched today yet (cron hasn't run)
+  const hasTodaysJobs = jobs.some(j => j.fetched_date === today);
+  const isStale = !loading && jobs.length > 0 && !hasTodaysJobs;
+
   useEffect(() => {
     if (!authLoading && !user) router.push('/login');
     if (!authLoading && user && !user.setup_complete) router.push('/setup');
@@ -37,7 +41,7 @@ export default function Dashboard() {
     if (!token || !user?.setup_complete) return;
     const h = { Authorization: `Bearer ${token}` };
     Promise.all([
-      fetch(`${API}/api/jobs?date=${today}`, { headers: h }).then(r => r.json()),
+      fetch(`${API}/api/jobs`, { headers: h }).then(r => r.json()),
       fetch(`${API}/api/topic/today`, { headers: h }).then(r => r.json()),
     ])
       .then(([j, t]) => {
@@ -46,7 +50,7 @@ export default function Dashboard() {
         setLoading(false);
       })
       .catch(err => { setError(err.message); setLoading(false); });
-  }, [token, user, today]);
+  }, [token, user]);
 
   async function triggerDigest() {
     setTriggering(true);
@@ -105,13 +109,25 @@ export default function Dashboard() {
           </div>
         )}
 
+        {isStale && (
+          <div className="bg-amber-50 border border-amber-200 text-amber-800 rounded-xl p-3 mb-5 text-xs flex items-center gap-2">
+            <span>⚠️</span>
+            <span>
+              Today's digest hasn't run yet — showing your existing queue.{' '}
+              <button onClick={triggerDigest} disabled={triggering} className="underline font-semibold hover:text-amber-900">
+                Fetch now
+              </button>
+            </span>
+          </div>
+        )}
+
         {/* System design topic */}
         <TopicCard topic={loading ? null : topic} />
 
         {/* Jobs header — filter tabs + cron note */}
         <div className="flex items-center justify-between mb-3 flex-wrap gap-3">
           <div className="flex items-center gap-3">
-            <h2 className="text-sm font-semibold text-gray-900">Today's matched jobs</h2>
+            <h2 className="text-sm font-semibold text-gray-900">Job queue</h2>
 
             {/* Filter tabs */}
             {!loading && jobs.length > 0 && (
@@ -159,9 +175,9 @@ export default function Dashboard() {
         ) : jobs.length === 0 ? (
           <div className="bg-white rounded-2xl border border-gray-100 p-12 text-center">
             <div className="text-4xl mb-3">📭</div>
-            <div className="text-gray-700 font-medium text-sm">No jobs fetched for today yet</div>
+            <div className="text-gray-700 font-medium text-sm">Your queue is empty</div>
             <div className="text-gray-400 text-xs mt-1.5 mb-5">
-              Jobs are fetched automatically at 7am IST. Trigger manually below.
+              Jobs are fetched automatically every morning. Trigger manually below.
             </div>
             <button
               onClick={triggerDigest}

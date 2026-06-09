@@ -57,7 +57,7 @@ Score guide:
  * Score jobs sequentially with a 500ms delay to avoid rate limits.
  * @param {object[]} jobs
  * @param {string} candidateProfileStr - formatted profile text for this user
- * @returns {object[]} jobs that scored >= 60, with score/reason/coverLetter attached
+ * @returns {object[]} jobs that scored >= 65, with score/reason/coverLetter attached
  */
 async function scoreJobsSequentially(jobs, candidateProfileStr) {
   const results = [];
@@ -66,7 +66,7 @@ async function scoreJobsSequentially(jobs, candidateProfileStr) {
     console.log(`[jobScorer] Scoring: ${job.title} @ ${job.company}`);
     const scored = await scoreJob(job, candidateProfileStr);
 
-    if (scored && scored.score >= 55) {
+    if (scored && scored.score >= 65) {
       results.push({
         ...job,
         matchScore: scored.score,
