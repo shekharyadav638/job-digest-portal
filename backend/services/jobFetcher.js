@@ -142,11 +142,12 @@ async function fetchJSearch(preferredRoles) {
         continue;
       }
       const data = await res.json();
-      if (!Array.isArray(data.data)) {
+      // Response shape: { data: { jobs: [...] } }
+      const items = Array.isArray(data.data) ? data.data : (data.data?.jobs || []);
+      if (!items.length && data.data) {
         console.warn('[jobFetcher] JSearch unexpected response shape:', JSON.stringify(data).slice(0, 200));
-        continue;
       }
-      for (const j of data.data) {
+      for (const j of items) {
         const id = j.job_id;
         if (!id || seen.has(id)) continue;
         seen.add(id);
@@ -169,7 +170,7 @@ async function fetchJSearch(preferredRoles) {
 }
 
 // ── The Muse ──────────────────────────────────────────────────────────────────
-// No auth needed. 500 req/hr. Entry Level filter perfect for SDE-1.
+// No auth needed. 500 req/hr.
 
 async function fetchTheMuse(_preferredRoles) {
   const pages = [0, 1, 2];
@@ -182,7 +183,6 @@ async function fetchTheMuse(_preferredRoles) {
       try {
         const params = new URLSearchParams({
           category: 'Software Engineer',
-          level: 'Entry Level',
           location,
           page: String(page),
         });
